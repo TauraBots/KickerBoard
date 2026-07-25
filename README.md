@@ -1,55 +1,82 @@
 # KickerBoard
 
-Open-source high-voltage kicker module for RoboCup Small Size League robots, developed by **TauraBots** and based on the **Analog Devices LT3751** capacitor charger controller.
+Open-source high-voltage kicker module for RoboCup Small Size League robots, developed by **TauraBots** and based on the **Analog Devices LT3751** capacitor-charger controller.
 
 > [!WARNING]
-> This project operates with hazardous high voltage and stores significant energy in a capacitor bank. Even after power is removed, the capacitor may remain charged. Work only with appropriate supervision, insulated tools, discharge procedures, shielding, interlocks, and measurement equipment rated for the voltage and pulse energy involved.
+> This project operates with hazardous high voltage and stores significant energy. Even after power is removed, the capacitor may remain charged. Work only in an appropriate supervised laboratory with shielding, interlocks, rated instruments, and a verified discharge procedure.
 
-## Project scope
+## Scope
 
-This repository is exclusively dedicated to the LT3751-based kicker system: charging stage, high-voltage capacitor bank, trigger stage, control firmware, PCB, simulations, measurements, assembly, testing, and scientific documentation.
+This repository is exclusively dedicated to the LT3751 kicker system: flyback charging, high-voltage storage, SCR trigger stage, ESP32-C3 supervision, PCB, simulations, LCR characterization, functional testing, manufacturing files, and scientific documentation.
 
-Motor drivers, BLDC electronics, Allegro A3930 circuits, Hall commutation, and unrelated TauraBots boards are intentionally outside this repository.
+Motor drivers, BLDC electronics, Hall commutation, Allegro A3930 circuits, and unrelated TauraBots boards are intentionally excluded.
 
-## Current reference configuration
+## Reference configuration
 
-| Parameter | Reference value |
+| Parameter | Consolidated value |
 |---|---:|
-| Input supply used in the documented reference | 12.6 V |
-| Nominal capacitor voltage | up to 200 V |
-| Energy-storage capacitor | 1000 µF |
-| Stored energy at 200 V | 20 J |
-| Simulated charge time to approximately 200 V | approximately 445–450 ms |
-| Simulated average input current during charging | approximately 5.20 A |
-| Simulated discharge RMS current | approximately 8.34 A |
-| Simulated discharge peak current | approximately 24.36 A |
-| Main charging spectral component | approximately 60 kHz |
-| Main controller | LT3751 |
-| Control platform used during development | ESP32-C3 |
+| Input range considered | 12–12.6 V |
+| Simulation source | 12.6 V with 50 mΩ series resistance |
+| Capacitor | 1000 µF |
+| Target voltage | approximately 200 V |
+| Stored energy | approximately 20 J |
+| Simulated charging time | approximately 445 ms |
+| Simulated input current, average | 5.045 A |
+| Simulated input current, RMS | 5.815 A |
+| Simulated input narrow peak | 116.103 A |
+| Simulated D1 current, average/RMS/peak | 0.380 / 0.659 / 1.741 A |
+| Simulated solenoid current, RMS | 5.071 A |
+| Simulated solenoid current, peak | 21.705 A |
+| Dominant recharge spectral component | approximately 60 kHz |
+| Estimated simulated energy efficiency | approximately 69.9% |
+| Controller | LT3751 |
+| Flyback transformer | Coilcraft GA3459-BL |
+| Main switching MOSFET in documented prototype | IRF640 |
+| High-voltage rectifier | ES3J |
+| Trigger device | TYN640-class SCR |
+| Auxiliary regulator | AP62300 |
+| Development controller | ESP32-C3 |
+| Approximate PCB dimensions | 80 mm × 50 mm |
 
-The values above are design-reference and simulation results unless a document explicitly identifies them as bench measurements. See [Measurements](docs/measurements.md) and [Validation status](docs/validation-status.md).
+The numerical current and efficiency values above are simulation-derived. Experimental evidence currently consists of LCR measurements and functional prototype validation. See [Measurements](docs/measurements.md) and [Validation status](docs/validation-status.md).
 
-The capacitor energy is:
+## Solenoid characterization
+
+The actuator was measured using the instrument's series-equivalent model:
+
+| Frequency | Ls | Rs | Q |
+|---:|---:|---:|---:|
+| 100 Hz | 12.340 mH | 5.65 Ω | 1.362 |
+| 120 Hz | 11.917 mH | 6.22 Ω | 1.450 |
+| 1 kHz | 6.957 mH | 26.61 Ω | 1.666 |
+| 10 kHz | 2.996 mH | 96.45 Ω | 1.961 |
+| 100 kHz | 2.043 mH | 442.70 Ω | 2.900 |
+
+The primary LTspice discharge model uses the 100 Hz point as a low-frequency approximation. It does not model magnetic saturation, plunger motion, temperature rise, or full electromechanical coupling.
+
+## Energy command
+
+For a user command representing stored-energy percentage:
 
 ```text
-E = 1/2 × C × V²
-E = 1/2 × 0.001 × 200² = 20 J
+Vtarget = Vmax × sqrt(percent / 100)
 ```
 
-## Features
+At `Vmax = 200 V`, 25%, 50%, 75%, and 100% energy correspond to approximately 100 V, 141.4 V, 173.2 V, and 200 V.
 
-- LT3751-based flyback capacitor charger
-- adjustable high-voltage setpoint
-- charge-enable control from an external microcontroller
-- DONE and FAULT monitoring
-- voltage feedback for supervisory control
-- independent kick trigger output stage
-- ESP32-C3 control example
-- serial commands for charging, stopping, status, setpoint adjustment, and firing
-- simulation workflow for charge time, input current, discharge current, RMS calculation, and FFT
-- manufacturing-oriented organization for schematic, PCB, Gerbers, BOM, and assembly data
+## Development interface
 
-## Repository structure
+| ESP32-C3 GPIO | Signal |
+|---:|---|
+| GPIO0 | READ |
+| GPIO1 | KICK |
+| GPIO2 | FAULT# |
+| GPIO3 | DONE# |
+| GPIO4 | CHARGE |
+
+This mapping must be checked against the released schematic and board revision.
+
+## Repository map
 
 ```text
 KickerBoard/
@@ -66,119 +93,40 @@ KickerBoard/
 │   ├── validation-status.md
 │   ├── safety.md
 │   ├── firmware.md
-│   ├── manufacturing.md
-│   └── repository-map.md
+│   └── manufacturing.md
 ├── firmware/
-│   └── README.md
 ├── hardware/
-│   ├── README.md
 │   ├── easyeda/
-│   ├── gerbers/
 │   ├── schematic/
+│   ├── gerbers/
 │   ├── bom/
 │   └── pick-and-place/
 ├── simulations/
-│   └── README.md
 ├── measurements/
-│   └── README.md
 ├── media/
-│   └── README.md
 └── paper/
-    └── README.md
 ```
 
-Binary design files, photographs, scope captures, Gerbers, EasyEDA source, LTspice projects, and the IEEE paper are added only when their exact source files have been verified. This prevents placeholder material from being mistaken for production-ready data.
+Binary design files are added only after their exact source and revision are verified. Documentation must never be used as a substitute for a tagged fabrication package.
 
-## System overview
+## Functional validation status
 
-The board converts the robot battery voltage into a regulated high-voltage DC bus. The LT3751 controls a flyback converter and terminates charging when the feedback network indicates that the selected capacitor voltage has been reached. A microcontroller supervises charging through digital control and status lines. The stored energy is then delivered to the solenoid through a separate high-current trigger stage.
+The physical prototype has completed the auxiliary-supply, flyback-enable, capacitor-charge, ready indication, SCR trigger, solenoid actuation, and recharge sequence. Quantitative hardware comparison of voltage, current, efficiency, EMI, and shot repeatability remains pending.
 
-Typical signal names used in the ESP32-C3 test firmware:
+## Paper
 
-| ESP32-C3 GPIO | Signal |
-|---:|---|
-| GPIO0 | READ, capacitor-voltage feedback |
-| GPIO1 | KICK, trigger control |
-| GPIO2 | FAULT# |
-| GPIO3 | DONE# |
-| GPIO4 | CHARGE |
+Associated manuscript:
 
-Verify the board revision before using this mapping. Pin assignments are not a substitute for the released schematic.
+**Projeto, Modelagem e Validação Funcional de um Sistema Compacto de Chute Eletromagnético para Robôs da RoboCup Small Size League**
 
-## Firmware behavior
+The current consolidated paper explicitly separates simulated quantities, LCR measurements, and functional observations.
 
-The development firmware provides serial commands to:
+## Acknowledgements
 
-- start charging;
-- stop charging;
-- trigger the kicker;
-- show full status;
-- change the voltage setpoint;
-- convert a requested kick percentage into a voltage target;
-- optionally fire automatically after the requested percentage is reached.
+The project acknowledges support, parts, tools, or technical material from Analog Devices, Coilcraft, Littelfuse, JLCPCB, and EasyEDA. Acknowledgement does not imply certification or endorsement of the complete board.
 
-Automatic firing must include timeout, FAULT handling, valid-voltage checks, minimum trigger-pulse spacing, and a safe discharge procedure.
+## License and citation
 
-## Manufacturing files
+See [LICENSE](LICENSE), [CONTRIBUTING.md](CONTRIBUTING.md), and [CITATION.cff](CITATION.cff).
 
-The intended release set includes:
-
-- EasyEDA source project;
-- schematic PDF;
-- PCB source;
-- Gerber archive;
-- drill files;
-- bill of materials;
-- pick-and-place file;
-- assembly drawings;
-- fabrication notes;
-- board revision history.
-
-Do not manufacture from screenshots or from documentation tables alone. Use a tagged release containing the verified fabrication package.
-
-## Simulation and measurements
-
-The project documentation distinguishes among:
-
-1. analytical calculations;
-2. LTspice simulation results;
-3. oscilloscope or multimeter bench measurements;
-4. inferred values calculated from captured waveforms.
-
-This distinction is important because a simulated 24.36 A discharge peak, for example, is not automatically an experimentally validated peak current.
-
-## Sponsors and acknowledgements
-
-PCB design was developed using [EasyEDA](https://easyeda.com/), and PCB fabrication and assembly support was provided by [JLCPCB](https://jlcpcb.com/).
-
-The project also acknowledges technical support, samples, components, or reference material from:
-
-- [Analog Devices](https://www.analog.com/) — LT3751 controller and technical documentation;
-- [Coilcraft](https://www.coilcraft.com/) — magnetic components and design support;
-- [Littelfuse](https://www.littelfuse.com/) — protection and power-semiconductor components.
-
-Acknowledgement does not imply that every listed company has certified or endorsed the complete board.
-
-## Documentation and paper
-
-The associated Portuguese IEEE-style manuscript is titled:
-
-**Projeto, Simulação, Implementação e Validação Experimental de um Módulo Kicker para Robôs de Futebol SSL Baseado no LT3751**
-
-The paper directory will contain the verified LaTeX source, bibliography, figures, and compiled PDF used for publication.
-
-## Contributing
-
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Contributions involving safety-critical changes must include calculations, component ratings, board revision, and validation evidence.
-
-## License
-
-Documentation and software licensing are described in [LICENSE](LICENSE). Hardware source releases should explicitly identify the applicable open-hardware license in each tagged release.
-
-## Citation
-
-Use [CITATION.cff](CITATION.cff) when citing this repository.
-
-## Team
-
-Developed by **TauraBots**, Universidade Federal de Santa Maria (UFSM), for research and development in RoboCup Small Size League robotics.
+Developed by **TauraBots**, Universidade Federal de Santa Maria (UFSM).
