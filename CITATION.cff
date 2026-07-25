@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+title: "KickerBoard: LT3751-based kicker module for RoboCup SSL"
+message: "If you use this project, please cite the repository and the associated paper when available."
+type: software
+authors:
+  - family-names: "TauraBots"
+    affiliation: "Universidade Federal de Santa Maria"
+repository-code: "https://github.com/TauraBots/KickerBoard"
+url: "https://github.com/TauraBots/KickerBoard"
+license: MIT
+version: 0.1.0
+date-released: 2026-07-25
+keywords:
+  - RoboCup
+  - Small Size League
+  - kicker
+  - LT3751
+  - high voltage
+  - capacitor charger
