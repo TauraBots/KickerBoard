@@ -1,0 +1,17 @@
+KickerBoard Licensing Notice
+
+Copyright (c) 2026 TauraBots / Universidade Federal de Santa Maria contributors.
+
+Software source code in this repository is licensed under the MIT License unless a file states otherwise.
+
+Hardware design files are intended to be released under CERN Open Hardware Licence Version 2 - Strongly Reciprocal (CERN-OHL-S-2.0) when verified source packages are published. Until those files are added with an explicit license header, no manufacturing authorization should be inferred from documentation or screenshots alone.
+
+Documentation, diagrams, and original written material are licensed under Creative Commons Attribution 4.0 International (CC BY 4.0), unless a file states otherwise.
+
+Third-party component models, datasheets, logos, photographs, and reference material remain subject to their respective owners' terms and are not relicensed by this notice.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of software covered by this notice, to deal in that software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies, subject to inclusion of this copyright and permission notice.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM USE OF THE SOFTWARE.
