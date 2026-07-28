@@ -123,7 +123,7 @@ The current consolidated paper explicitly separates simulated quantities, LCR me
 
 ## Acknowledgements
 
-The project acknowledges support, parts, tools, or technical material from Analog Devices, Coilcraft, Littelfuse, JLCPCB, and EasyEDA. Acknowledgement does not imply certification or endorsement of the complete board.
+The project acknowledges support, parts, tools, or technical material from [JLCPCB](https://jlcpcb.com/), and [EasyEDA](https://easyeda.com/). Acknowledgement does not imply certification or endorsement of the complete board.
 
 ## License and citation
 
