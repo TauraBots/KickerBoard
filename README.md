@@ -11,6 +11,11 @@ This repository is exclusively dedicated to the LT3751 kicker system: flyback ch
 
 Motor drivers, BLDC electronics, Hall commutation, Allegro A3930 circuits, and unrelated TauraBots boards are intentionally excluded.
 
+## Acknowledgements
+
+The project acknowledges support, parts, tools, or technical material from [JLCPCB](https://jlcpcb.com/), and [EasyEDA](https://easyeda.com/).
+
+
 ## Reference configuration
 
 | Parameter | Consolidated value |
@@ -120,10 +125,6 @@ Associated manuscript:
 **Projeto, Modelagem e Validação Funcional de um Sistema Compacto de Chute Eletromagnético para Robôs da RoboCup Small Size League**
 
 The current consolidated paper explicitly separates simulated quantities, LCR measurements, and functional observations.
-
-## Acknowledgements
-
-The project acknowledges support, parts, tools, or technical material from [JLCPCB](https://jlcpcb.com/), and [EasyEDA](https://easyeda.com/). Acknowledgement does not imply certification or endorsement of the complete board.
 
 ## License and citation
 
