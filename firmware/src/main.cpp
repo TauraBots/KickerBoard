@@ -516,7 +516,7 @@ void tarefa_i2c(void *)
         resposta[13] = crc8(resposta, TAMANHO_STATUS_I2C - 1);
 
         uint32_t escritos = 0;
-        ESP_ERROR_CHECK_WITHOUT_ABORT(i2c_slave_reset_tx_fifo(i2c_handle));
+        //ESP_ERROR_CHECK_WITHOUT_ABORT(i2c_slave_reset_tx_fifo(i2c_handle));
         const esp_err_t erro = i2c_slave_write(i2c_handle, resposta, sizeof(resposta), &escritos, 100);
         if (erro != ESP_OK || escritos != sizeof(resposta))
             ESP_LOGW(TAG, "Resposta I2C incompleta: %lu/%u (%s)", static_cast<unsigned long>(escritos),
