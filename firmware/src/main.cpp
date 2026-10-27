@@ -8,18 +8,13 @@
 #include "driver/gpio.h"
 #include "driver/i2c_slave.h"
 #include "esp_adc/adc_oneshot.h"
-#include "esp_event.h"
-#include "esp_http_server.h"
 #include "esp_log.h"
-#include "esp_netif.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
-#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "nvs_flash.h"
 
 namespace {
 
@@ -47,14 +42,10 @@ constexpr float SETPOINT_MINIMO = 20.0f;
 constexpr float SETPOINT_MAXIMO = 200.0f;
 constexpr float TENSAO_MAXIMA_SEGURANCA = 205.0f;
 
-constexpr char WIFI_SSID[] = "TauraBots-Kicker";
-constexpr char WIFI_SENHA[] = "taurabots2026";
-constexpr int8_t WIFI_POTENCIA_QUARTO_DBM = 34;  // 8,5 dBm
 const char *TAG = "kicker";
 
 adc_oneshot_unit_handle_t adc_handle;
 i2c_slave_dev_handle_t i2c_handle;
-httpd_handle_t servidor;
 SemaphoreHandle_t mutex_estado;
 QueueHandle_t fila_comandos;
 QueueHandle_t fila_eventos_i2c;
@@ -80,7 +71,7 @@ struct EventoI2c {
     uint8_t tamanho;
     uint8_t dados[4];
 };
-struct EstadoWeb {
+struct EstadoCompartilhado {
     float tensao;
     float alvo;
     float setpoint;
@@ -89,10 +80,16 @@ struct EstadoWeb {
     bool auto_chute;
     bool done;
     bool fault;
-} estado_web;
+} estado_compartilhado;
+
+uint32_t eventos_i2c_descartados;
 
 uint64_t agora_ms() { return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL; }
-void esperar_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
+void esperar_ms(uint32_t ms)
+{
+    const TickType_t ticks = pdMS_TO_TICKS(ms);
+    vTaskDelay(ticks > 0 ? ticks : 1);
+}
 bool done_ativo() { return gpio_get_level(PIN_DONE) == 0; }
 bool fault_ativo() { return gpio_get_level(PIN_FAULT) == 0; }
 
@@ -203,17 +200,17 @@ void imprimir_log()
            static_cast<unsigned long long>(agora - inicio_carga));
 }
 
-void publicar_estado_web()
+void publicar_estado_compartilhado()
 {
     xSemaphoreTake(mutex_estado, portMAX_DELAY);
-    estado_web.tensao = valor_atual;
-    estado_web.alvo = tensao_auto_chute;
-    estado_web.setpoint = valor_setado;
-    estado_web.adc = leitura_adc;
-    estado_web.carregando = carregando;
-    estado_web.auto_chute = auto_chute_ativo;
-    estado_web.done = done_ativo();
-    estado_web.fault = fault_ativo();
+    estado_compartilhado.tensao = valor_atual;
+    estado_compartilhado.alvo = tensao_auto_chute;
+    estado_compartilhado.setpoint = valor_setado;
+    estado_compartilhado.adc = leitura_adc;
+    estado_compartilhado.carregando = carregando;
+    estado_compartilhado.auto_chute = auto_chute_ativo;
+    estado_compartilhado.done = done_ativo();
+    estado_compartilhado.fault = fault_ativo();
     xSemaphoreGive(mutex_estado);
 }
 
@@ -269,112 +266,6 @@ void ler_serial()
     }
 }
 
-esp_err_t pagina_handler(httpd_req_t *req)
-{
-    float tensao, alvo;
-    bool carga, auto_chute;
-    xSemaphoreTake(mutex_estado, portMAX_DELAY);
-    tensao = estado_web.tensao; alvo = estado_web.alvo;
-    carga = estado_web.carregando; auto_chute = estado_web.auto_chute;
-    xSemaphoreGive(mutex_estado);
-
-    char estado_auto[48];
-    if (auto_chute) snprintf(estado_auto, sizeof(estado_auto), "ARMADO para %.1f V", alvo);
-    else strcpy(estado_auto, "DESARMADO");
-    char pagina[2300];
-    const int n = snprintf(pagina, sizeof(pagina),
-        "<!DOCTYPE html><html lang='pt-BR'><head><meta charset='UTF-8'>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'><title>TauraBots Kicker</title><style>"
-        "body{font-family:Arial,sans-serif;text-align:center;background:#111;color:#eee;margin:0;padding:35px 15px}"
-        ".box{max-width:420px;margin:auto;background:#1d1d1d;padding:25px;border-radius:15px}"
-        ".v{font-size:32px;font-weight:bold;margin:20px 0}.estado{margin-bottom:20px;color:#bbb}"
-        "button{width:100%%;padding:22px;font-size:25px;font-weight:bold;border:0;border-radius:12px;background:#d62828;color:white;cursor:pointer}"
-        "button:active{transform:scale(.98)}</style></head><body><div class='box'><h1>TauraBots Kicker</h1>"
-        "<div style='color:#f59e0b;font-weight:bold;margin-bottom:15px'>INTERFACE ESP-IDF - PORCENTAGEM</div>"
-        "<div class='v'>%.1f V</div><div class='estado'>Carregamento: %s</div>"
-        "<div class='estado'>Auto-Kick: %s</div>"
-        "<form method='POST' action='/percent'><label for='p'>Porcentagem do disparo:</label><br><br>"
-        "<input id='p' name='p' type='number' min='1' max='100' step='1' value='80' required "
-        "style='width:100%%;box-sizing:border-box;padding:15px;font-size:22px;text-align:center;border-radius:10px;border:0;margin-bottom:12px'>"
-        "<button type='submit' style='background:#f59e0b;margin-bottom:18px'>CARREGAR E DISPARAR (%%)</button></form>"
-        "<form method='POST' action='/kick' onsubmit=\"return confirm('Confirmar disparo imediato?')\">"
-        "<button type='submit'>DISPARAR AGORA</button></form><p><a href='/' style='color:#aaa'>Atualizar status</a></p>"
-        "</div></body></html>", tensao, carga ? "ON" : "OFF", estado_auto);
-    if (n < 0 || n >= static_cast<int>(sizeof(pagina)))
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Página excedeu o buffer");
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
-    return httpd_resp_send(req, pagina, n);
-}
-
-esp_err_t percentual_handler(httpd_req_t *req)
-{
-    if (req->content_len <= 0 || req->content_len >= 32)
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Porcentagem não informada");
-    char corpo[32] = {};
-    int total = 0;
-    while (total < req->content_len) {
-        const int n = httpd_req_recv(req, corpo + total, req->content_len - total);
-        if (n <= 0) return ESP_FAIL;
-        total += n;
-    }
-    if (strncmp(corpo, "p=", 2)) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Campo inválido");
-    char *fim;
-    const float percentual = strtof(corpo + 2, &fim);
-    if (fim == corpo + 2 || *fim || percentual <= 0.0f || percentual > 100.0f)
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Use uma porcentagem de 1 a 100");
-    const ComandoRemoto comando{TipoComando::Percentual, percentual};
-    if (xQueueSend(fila_comandos, &comando, 0) != pdTRUE) {
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        return httpd_resp_send(req, "Fila de comandos ocupada", HTTPD_RESP_USE_STRLEN);
-    }
-    httpd_resp_set_status(req, "303 See Other");
-    httpd_resp_set_hdr(req, "Location", "/");
-    return httpd_resp_send(req, nullptr, 0);
-}
-
-esp_err_t chute_handler(httpd_req_t *req)
-{
-    const ComandoRemoto comando{TipoComando::Chute, 0.0f};
-    if (xQueueSend(fila_comandos, &comando, 0) != pdTRUE) {
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        return httpd_resp_send(req, "Fila de comandos ocupada", HTTPD_RESP_USE_STRLEN);
-    }
-    httpd_resp_set_status(req, "303 See Other");
-    httpd_resp_set_hdr(req, "Location", "/");
-    return httpd_resp_send(req, nullptr, 0);
-}
-
-void iniciar_wifi_e_servidor()
-{
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_ap();
-    wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&init));
-    wifi_config_t cfg = {};
-    memcpy(cfg.ap.ssid, WIFI_SSID, sizeof(WIFI_SSID) - 1);
-    cfg.ap.ssid_len = sizeof(WIFI_SSID) - 1;
-    memcpy(cfg.ap.password, WIFI_SENHA, sizeof(WIFI_SENHA) - 1);
-    cfg.ap.channel = 1;
-    cfg.ap.max_connection = 1;
-    cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &cfg));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(WIFI_POTENCIA_QUARTO_DBM));
-
-    httpd_config_t config_http = HTTPD_DEFAULT_CONFIG();
-    ESP_ERROR_CHECK(httpd_start(&servidor, &config_http));
-    httpd_uri_t pagina = {}; pagina.uri = "/"; pagina.method = HTTP_GET; pagina.handler = pagina_handler;
-    httpd_uri_t percentual = {}; percentual.uri = "/percent"; percentual.method = HTTP_POST; percentual.handler = percentual_handler;
-    httpd_uri_t chute = {}; chute.uri = "/kick"; chute.method = HTTP_POST; chute.handler = chute_handler;
-    ESP_ERROR_CHECK(httpd_register_uri_handler(servidor, &pagina));
-    ESP_ERROR_CHECK(httpd_register_uri_handler(servidor, &percentual));
-    ESP_ERROR_CHECK(httpd_register_uri_handler(servidor, &chute));
-    printf("Wi-Fi criado: %s\nServidor Web iniciado em http://192.168.4.1\n", WIFI_SSID);
-}
-
 void inicializar_hardware()
 {
     gpio_config_t saidas = {};
@@ -426,7 +317,8 @@ bool i2c_requisicao_cb(i2c_slave_dev_handle_t, const i2c_slave_request_event_dat
 {
     const EventoI2c evento{TipoEventoI2c::LeituraSolicitada, 0, {}};
     BaseType_t tarefa_acordada = pdFALSE;
-    xQueueSendFromISR(fila_eventos_i2c, &evento, &tarefa_acordada);
+    if (xQueueSendFromISR(fila_eventos_i2c, &evento, &tarefa_acordada) != pdTRUE)
+        __atomic_fetch_add(&eventos_i2c_descartados, 1U, __ATOMIC_RELAXED);
     return tarefa_acordada == pdTRUE;
 }
 
@@ -440,7 +332,8 @@ bool i2c_recebimento_cb(i2c_slave_dev_handle_t, const i2c_slave_rx_done_event_da
         evento.tamanho = 0xff;
     }
     BaseType_t tarefa_acordada = pdFALSE;
-    xQueueSendFromISR(fila_eventos_i2c, &evento, &tarefa_acordada);
+    if (xQueueSendFromISR(fila_eventos_i2c, &evento, &tarefa_acordada) != pdTRUE)
+        __atomic_fetch_add(&eventos_i2c_descartados, 1U, __ATOMIC_RELAXED);
     return tarefa_acordada == pdTRUE;
 }
 
@@ -495,9 +388,9 @@ void tarefa_i2c(void *)
             continue;
         }
 
-        EstadoWeb estado;
+        EstadoCompartilhado estado;
         xSemaphoreTake(mutex_estado, portMAX_DELAY);
-        estado = estado_web;
+        estado = estado_compartilhado;
         xSemaphoreGive(mutex_estado);
 
         uint8_t resposta[TAMANHO_STATUS_I2C] = {};
@@ -516,7 +409,6 @@ void tarefa_i2c(void *)
         resposta[13] = crc8(resposta, TAMANHO_STATUS_I2C - 1);
 
         uint32_t escritos = 0;
-        //ESP_ERROR_CHECK_WITHOUT_ABORT(i2c_slave_reset_tx_fifo(i2c_handle));
         const esp_err_t erro = i2c_slave_write(i2c_handle, resposta, sizeof(resposta), &escritos, 100);
         if (erro != ESP_OK || escritos != sizeof(resposta))
             ESP_LOGW(TAG, "Resposta I2C incompleta: %lu/%u (%s)", static_cast<unsigned long>(escritos),
@@ -589,25 +481,18 @@ extern "C" void app_main()
     fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
     mutex_estado = xSemaphoreCreateMutex();
     fila_comandos = xQueueCreate(8, sizeof(ComandoRemoto));
-    fila_eventos_i2c = xQueueCreate(8, sizeof(EventoI2c));
+    fila_eventos_i2c = xQueueCreate(16, sizeof(EventoI2c));
     if (!mutex_estado || !fila_comandos || !fila_eventos_i2c) {
         ESP_LOGE(TAG, "Falha ao criar objetos do FreeRTOS");
         abort();
     }
 
-    esp_err_t nvs = nvs_flash_init();
-    if (nvs == ESP_ERR_NVS_NO_FREE_PAGES || nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        nvs = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(nvs);
     inicializar_hardware();
     atualizar_leitura();
-    publicar_estado_web();
+    publicar_estado_compartilhado();
     printf("\n================================\nESP32-C3 iniciado com ESP-IDF\n================================\n");
     printf("Comandos: 1=carga, 2=parar, 3=chute, status=estado, 20-200=setpoint, 1%%-100%%=auto-kick\n");
     iniciar_i2c();
-    iniciar_wifi_e_servidor();
 
     while (true) {
         atualizar_leitura();
@@ -615,7 +500,7 @@ extern "C" void app_main()
         ler_serial();
         processar_fila_remota();
         imprimir_log();
-        publicar_estado_web();
+        publicar_estado_compartilhado();
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
