@@ -18,8 +18,8 @@ Cada comando deve ser enviado em uma transação de escrita separada.
 | Bytes | Operação |
 |---|---|
 | `00` | Selecionar status; não altera o kicker |
-| `01` | Iniciar carregamento |
-| `02` | Parar carregamento |
+| `01` | Iniciar carregamento (também rearma a pré-carga mantida, se estiver desarmada) |
+| `02` | Parar carregamento (também desarma a pré-carga mantida, se estiver armada) |
 | `03` | Disparar KICK imediatamente |
 | `04 VV VV` | Alterar setpoint em décimos de volt, de 200 a 2000 |
 | `05 PP` | Carregar e disparar automaticamente em `PP`%, de 1 a 100 |
@@ -54,6 +54,22 @@ Flags do byte 2:
 - Bit 1: auto-kick armado
 - Bit 2: `DONE#` ativo
 - Bit 3: `FAULT#` ativo
+- Bit 4: bola presente (TOF050C: `BOLA_PRESENTE` confirmado com leitura de até 100 ms)
+- Bit 5: o último pedido de chute terminou **sem chute** (bloqueado, expirado ou cancelado);
+  volta a 0 no próximo chute autorizado
+- Bits 6–7: reservados (0)
+
+Os bits 4 e 5 são uma extensão compatível: antes valiam sempre 0, e o tamanho e os demais campos
+do pacote não mudaram.
+
+## Autorização do chute
+
+O comando `03` (assim como `3` pela Serial e o auto-kick) **não dispara imediatamente**: ele cria
+um pedido que só gera chute se, **em até 200 ms**, o TOF050C indicar bola presente com leitura
+válida e recente e o `FAULT#` estiver inativo. Caso contrário, o pedido expira e o bit 5 do status
+vai a 1. Cada pedido gera no máximo um chute. Um novo `03` substitui o pendente (não há fila), e
+`02` cancela o pedido pendente. No auto-kick (`05`), a carga para no alvo e o chute fica pendente
+pela mesma regra.
 
 O CRC usa polinômio `0x07`, valor inicial `0x00`, sem reflexão e sem XOR final.
 
