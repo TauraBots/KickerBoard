@@ -149,15 +149,39 @@ void desarmar_pre_carga(const char *motivo)
     printf("[PRE] DESARMADA: %s | %lu recarga(s)\n", motivo, static_cast<unsigned long>(pre_carga_total_recargas));
 }
 
-void atualizar_leitura()
+void parar_carregamento(const char *motivo);
+
+// Falha na leitura do ADC: sem saber a tensão, não se pode carregar. Antes isso
+// reiniciava o ESP (ESP_ERROR_CHECK) e, como a pré-carga arma no boot, a carga
+// recomeçaria em seguida. Agora a carga é cortada e a pré-carga desarmada.
+bool adc_ok = true;
+uint32_t falhas_adc;
+
+void tratar_falha_adc(esp_err_t erro)
+{
+    ++falhas_adc;
+    if (adc_ok) printf("ADC: FALHA NA LEITURA (%s) | carga bloqueada\n", esp_err_to_name(erro));
+    adc_ok = false;
+    if (carregando) parar_carregamento("FALHA NA LEITURA DO ADC");
+    desarmar_pre_carga("falha na leitura do ADC");
+}
+
+// Retorna false se a leitura falhou (valor_atual mantém a última leitura válida).
+bool atualizar_leitura()
 {
     uint32_t soma = 0;
     for (uint8_t i = 0; i < AMOSTRAS_ADC; ++i) {
         int bruto = 0;
-        ESP_ERROR_CHECK(adc_oneshot_read(adc_handle, ADC_CANAL, &bruto));
+        const esp_err_t erro = adc_oneshot_read(adc_handle, ADC_CANAL, &bruto);
+        if (erro != ESP_OK) {
+            tratar_falha_adc(erro);
+            return false;
+        }
         soma += static_cast<uint32_t>(bruto);
         esp_rom_delay_us(50);
     }
+    if (!adc_ok) printf("ADC: leitura restabelecida (pre-carga continua desarmada: use pre on ou 1)\n");
+    adc_ok = true;
     const uint16_t media = static_cast<uint16_t>(soma / AMOSTRAS_ADC);
     float tensao = media * TENSAO_CALIBRACAO / ADC_EM_200V * FATOR_CALIBRACAO;
     if (tensao < 0.5f) tensao = 0.0f;
@@ -166,6 +190,7 @@ void atualizar_leitura()
     leitura_adc = media;
     valor_atual = tensao;
     xSemaphoreGive(mutex_estado);
+    return true;
 }
 
 void mostrar_status()
@@ -186,6 +211,8 @@ void mostrar_status()
            static_cast<unsigned long>(autorizador.autorizacoes()), static_cast<unsigned long>(autorizador.bloqueios()));
     printf("DONE#: %d - %s\n", gpio_get_level(PIN_DONE), done_ativo() ? "ATIVO" : "INATIVO");
     printf("FAULT#: %d - %s\n", gpio_get_level(PIN_FAULT), fault_ativo() ? "ATIVO" : "INATIVO");
+    printf("ADC: %s | falhas de leitura: %lu\n", adc_ok ? "OK" : "FALHA (carga bloqueada)",
+           static_cast<unsigned long>(falhas_adc));
     printf("CHARGE: %d\nKICK: %d\n============================\n",
            gpio_get_level(PIN_CARREGAMENTO), gpio_get_level(PIN_CHUTE));
 }
@@ -228,6 +255,7 @@ void iniciar_carregamento_ate(float alvo, bool pre_carga)
         return;
     }
     if (fault_ativo()) { printf("Carga não iniciada: FAULT# está ativo.\n"); return; }
+    if (!adc_ok) { printf("Carga não iniciada: falha na leitura do ADC.\n"); return; }
     gpio_set_level(PIN_CARREGAMENTO, 0);
     gpio_set_level(PIN_CHUTE, 0);
     esperar_ms(5);
@@ -361,6 +389,7 @@ void armar_pre_carga()
 #endif
     if (pre_carga_armada) { printf("[PRE] Ja esta armada.\n"); return; }
     if (fault_ativo()) { printf("[PRE] NAO armada: FAULT# esta ativo.\n"); return; }
+    if (!adc_ok) { printf("[PRE] NAO armada: falha na leitura do ADC.\n"); return; }
     const uint64_t agora = agora_ms();
     pre_carga_armada = true;
     pre_carga_inicio = pre_carga_janela_inicio = agora;
@@ -662,7 +691,7 @@ void tarefa_i2c(void *)
 
         uint8_t resposta[TAMANHO_STATUS_I2C] = {};
         resposta[0] = 0xa5;
-        resposta[1] = 0x01;
+        resposta[1] = 0x02;  // v2: 03 exige bola, 01/02 afetam a pré-carga, flags bits 4-5
         resposta[2] = (estado.carregando ? 1U : 0U) |
                       (estado.auto_chute ? 2U : 0U) |
                       (estado.done ? 4U : 0U) |

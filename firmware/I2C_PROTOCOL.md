@@ -38,7 +38,7 @@ Uma leitura de 14 bytes retorna:
 | Offset | Campo | Descrição |
 |---:|---|---|
 | 0 | Cabeçalho | Sempre `A5` |
-| 1 | Versão | Versão do protocolo, atualmente `01` |
+| 1 | Versão | Versão do protocolo, atualmente `02` (ver "Mudanças da versão 02") |
 | 2 | Flags | Bits descritos abaixo |
 | 3 | Sequência | Incrementa a cada resposta |
 | 4–5 | Tensão | Tensão medida em décimos de volt |
@@ -61,6 +61,23 @@ Flags do byte 2:
 
 Os bits 4 e 5 são uma extensão compatível: antes valiam sempre 0, e o tamanho e os demais campos
 do pacote não mudaram.
+
+## Mudanças da versão 02
+
+O formato (14 bytes, campos e CRC) é o mesmo da versão 01. Mudou o **comportamento**:
+
+| Item | Versão 01 | Versão 02 |
+|---|---|---|
+| `03` | dispara imediatamente | cria um pedido que só chuta com a bola presente em até 200 ms |
+| `05 PP` (auto-kick) | dispara ao atingir o alvo | ao atingir o alvo, para a carga e pede o chute (mesma regra) |
+| `01` | inicia o carregamento | inicia o carregamento **e rearma a pré-carga mantida** |
+| `02` | para o carregamento | para o carregamento, **desarma a pré-carga** e cancela o pedido de chute |
+| Flags bit 4 | sempre 0 | bola presente |
+| Flags bit 5 | sempre 0 | último pedido de chute terminou sem chute |
+| Pré-carga | não existia | mantém o capacitor em ~50 V desde o boot |
+
+O mestre deve conferir o byte 1 e tratar `03` como um **pedido**: depois de enviá-lo, ler o
+status e verificar o bit 5 (ou a queda da tensão) para saber se o chute ocorreu.
 
 ## Autorização do chute
 
