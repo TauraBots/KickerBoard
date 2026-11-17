@@ -18,8 +18,8 @@ Cada comando deve ser enviado em uma transação de escrita separada.
 | Bytes | Operação |
 |---|---|
 | `00` | Selecionar status; não altera o kicker |
-| `01` | Iniciar carregamento |
-| `02` | Parar carregamento |
+| `01` | Iniciar carregamento (também rearma a pré-carga mantida, se estiver desarmada) |
+| `02` | Parar carregamento (também desarma a pré-carga mantida, se estiver armada) |
 | `03` | Disparar KICK imediatamente |
 | `04 VV VV` | Alterar setpoint em décimos de volt, de 200 a 2000 |
 | `05 PP` | Carregar e disparar automaticamente em `PP`%, de 1 a 100 |
@@ -38,7 +38,7 @@ Uma leitura de 14 bytes retorna:
 | Offset | Campo | Descrição |
 |---:|---|---|
 | 0 | Cabeçalho | Sempre `A5` |
-| 1 | Versão | Versão do protocolo, atualmente `01` |
+| 1 | Versão | Versão do protocolo, atualmente `02` (ver "Mudanças da versão 02") |
 | 2 | Flags | Bits descritos abaixo |
 | 3 | Sequência | Incrementa a cada resposta |
 | 4–5 | Tensão | Tensão medida em décimos de volt |
@@ -54,6 +54,39 @@ Flags do byte 2:
 - Bit 1: auto-kick armado
 - Bit 2: `DONE#` ativo
 - Bit 3: `FAULT#` ativo
+- Bit 4: bola presente (TOF050C: `BOLA_PRESENTE` confirmado com leitura de até 100 ms)
+- Bit 5: o último pedido de chute terminou **sem chute** (bloqueado, expirado ou cancelado);
+  volta a 0 no próximo chute autorizado
+- Bits 6–7: reservados (0)
+
+Os bits 4 e 5 são uma extensão compatível: antes valiam sempre 0, e o tamanho e os demais campos
+do pacote não mudaram.
+
+## Mudanças da versão 02
+
+O formato (14 bytes, campos e CRC) é o mesmo da versão 01. Mudou o **comportamento**:
+
+| Item | Versão 01 | Versão 02 |
+|---|---|---|
+| `03` | dispara imediatamente | cria um pedido que só chuta com a bola presente em até 200 ms |
+| `05 PP` (auto-kick) | dispara ao atingir o alvo | ao atingir o alvo, para a carga e pede o chute (mesma regra) |
+| `01` | inicia o carregamento | inicia o carregamento **e rearma a pré-carga mantida** |
+| `02` | para o carregamento | para o carregamento, **desarma a pré-carga** e cancela o pedido de chute |
+| Flags bit 4 | sempre 0 | bola presente |
+| Flags bit 5 | sempre 0 | último pedido de chute terminou sem chute |
+| Pré-carga | não existia | mantém o capacitor em ~50 V desde o boot |
+
+O mestre deve conferir o byte 1 e tratar `03` como um **pedido**: depois de enviá-lo, ler o
+status e verificar o bit 5 (ou a queda da tensão) para saber se o chute ocorreu.
+
+## Autorização do chute
+
+O comando `03` (assim como `3` pela Serial e o auto-kick) **não dispara imediatamente**: ele cria
+um pedido que só gera chute se, **em até 200 ms**, o TOF050C indicar bola presente com leitura
+válida e recente e o `FAULT#` estiver inativo. Caso contrário, o pedido expira e o bit 5 do status
+vai a 1. Cada pedido gera no máximo um chute. Um novo `03` substitui o pendente (não há fila), e
+`02` cancela o pedido pendente. No auto-kick (`05`), a carga para no alvo e o chute fica pendente
+pela mesma regra.
 
 O CRC usa polinômio `0x07`, valor inicial `0x00`, sem reflexão e sem XOR final.
 
