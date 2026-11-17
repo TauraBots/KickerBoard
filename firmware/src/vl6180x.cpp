@@ -222,6 +222,8 @@ esp_err_t Sensor::disparar_medicao(bool verificar)
         esp_err_t erro = ler8(RESULT__RANGE_STATUS, &status);
         if (erro != ESP_OK) return erro;
         if (!(status & 0x01)) return ESP_ERR_INVALID_STATE;  // ainda ocupado
+        // Necessário: testado em hardware, sem esta limpeza o VL6180X passa a
+        // ignorar os STARTs e trava (só volta desligando a alimentação).
         if ((erro = escrever8(SYSTEM__INTERRUPT_CLEAR, LIMPAR_TODAS_INTERRUPCOES)) != ESP_OK) return erro;
     }
     return escrever8(SYSRANGE__START, 0x01);  // startstop = 1, modo single-shot

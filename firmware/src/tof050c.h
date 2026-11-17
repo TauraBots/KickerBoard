@@ -15,6 +15,10 @@ namespace tof050c {
 // UART0 da ROM (20/21) e não aparecem no esquemático Schematic1_3.
 constexpr int PIN_SDA = 5;
 constexpr int PIN_SCL = 10;
+// XSHUT do módulo: reset por hardware do VL6180X. GPIO20 (RX do UART0, sem uso:
+// o console é USB) não é strapping e fica só como entrada durante o boot.
+// Open-drain: só puxa para 0; o nível alto vem do pull-up do próprio módulo.
+constexpr int PIN_XSHUT = 20;
 
 struct Leitura {
     bool sensor_ok;           // sensor inicializado e respondendo

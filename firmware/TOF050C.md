@@ -22,7 +22,7 @@ O I²C escravo do kicker (`0x42`, GPIO6/GPIO7, status de 14 bytes) continua igua
 | SDA | **GPIO5** |
 | SCL | **GPIO10** |
 | GPIO1 / INT | não ligar |
-| XSHUT / SHUT | não ligar (o módulo tem pull-up) ou ligar ao 3V3 |
+| XSHUT / SHUT | **GPIO20** (open-drain; o nível alto vem do pull-up do módulo) |
 
 - Alimente com **3,3 V**. Os pull-ups de SDA/SCL de muitos módulos vão para o VIN; com 5 V, as
   linhas do ESP32-C3 (que não tolera 5 V) ficariam em 5 V.
@@ -115,7 +115,11 @@ Transições para `BOLA_AUSENTE`, todas imediatas (*fail-safe*):
 - leitura válida acima de 55 mm;
 - **leitura inválida** (código ≠ 0 ou erro de sistema), mesmo dentro da histerese;
 - leitura desatualizada (> 100 ms sem amostra nova);
-- timeout de medição, erro I²C ou reinicialização do sensor.
+- **2 timeouts de medição seguidos** (o sensor é reiniciado pelo XSHUT), erro I²C ou reinicialização do sensor.
+
+Uma medição perdida **isolada** (timeout de 50 ms) é refeita **sem** derrubar a presença: a regra
+dos 100 ms continua garantindo que nunca se usa um dado velho. Medido em hardware: ~1 perda a cada
+~90 medições, em rajadas, de causa ainda não identificada.
 
 A contagem de confirmações é zerada por: leitura inválida, leitura ≥ 50 mm, intervalo > 100 ms entre
 amostras e qualquer falha.

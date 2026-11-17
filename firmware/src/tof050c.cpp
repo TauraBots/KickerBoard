@@ -24,14 +24,19 @@ constexpr UBaseType_t PRIORIDADE_TAREFA = 1;
 constexpr uint32_t PILHA_TAREFA = 4096;
 
 constexpr uint32_t INTERVALO_CONSULTA_MS = 1;         // entre consultas, após ESPERA_MINIMA_MEDICAO_MS
-// Meio período de 2 us => SCL de ~200 kHz (VL6180X aceita até 400 kHz).
-constexpr uint32_t MEIO_PERIODO_I2C_US = 2;
-// Sem resultado neste prazo => timeout. 2x a medição mais longa (convergência
-// máxima + averaging), para recuperar rápido de uma medição perdida.
-constexpr uint32_t TIMEOUT_AMOSTRA_MS = 2 * vl6180x::TEMPO_MAXIMO_MEDICAO_MS;
+// Meio período de 5 us => SCL de ~100 kHz. Medido em hardware: a ~200 kHz
+// (2 us) havia ~2 medições perdidas por segundo; a ~100 kHz, ~0,2 por segundo.
+constexpr uint32_t MEIO_PERIODO_I2C_US = 5;
+// Sem resultado neste prazo => medição perdida. Pouco acima da medição mais longa
+// (sem alvo: ~36 ms), para que uma perda isolada seja refeita e o novo resultado
+// chegue antes de a leitura anterior completar 100 ms (bola::MAX_IDADE_LEITURA_MS).
+constexpr uint32_t TIMEOUT_AMOSTRA_MS = vl6180x::TEMPO_MAXIMO_MEDICAO_MS + 10;
+static_assert(TIMEOUT_AMOSTRA_MS < bola::MAX_IDADE_LEITURA_MS,
+              "o timeout de medicao deve ser menor que a idade maxima da leitura");
 constexpr uint32_t ESPERA_REINICIALIZACAO_MS = 3000;  // entre tentativas de inicialização
 constexpr uint32_t ERROS_I2C_PARA_REINICIAR = 5;      // erros consecutivos antes de reinicializar
-constexpr uint32_t TIMEOUTS_PARA_REINICIAR = 3;
+// 2 timeouts seguidos => reinicializa com pulso no XSHUT (recuperação em ~0,2 s).
+constexpr uint32_t TIMEOUTS_PARA_REINICIAR = 2;
 constexpr uint32_t INTERVALO_LINHA_MS = 200;          // linhas "[TOF] ..." (5 Hz)
 constexpr uint32_t INTERVALO_RESUMO_MS = 10000;       // bloco "===== TOF050C ====="
 
@@ -177,9 +182,33 @@ void diagnosticar_barramento()
     printf("[TOF] =============================================================\n");
 }
 
+void configurar_xshut()
+{
+    gpio_set_level(static_cast<gpio_num_t>(PIN_XSHUT), 1);  // 1 em open-drain = solto (sensor ligado)
+    gpio_config_t config = {};
+    config.pin_bit_mask = 1ULL << PIN_XSHUT;
+    config.mode = GPIO_MODE_OUTPUT_OD;
+    config.pull_up_en = GPIO_PULLUP_DISABLE;  // o nível alto vem do pull-up do módulo
+    config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    config.intr_type = GPIO_INTR_DISABLE;
+    if (gpio_config(&config) != ESP_OK) printf("[TOF] Aviso: falha ao configurar XSHUT (GPIO%d)\n", PIN_XSHUT);
+    gpio_set_level(static_cast<gpio_num_t>(PIN_XSHUT), 1);
+}
+
+// Reset por hardware: XSHUT em 0 desliga o VL6180X por completo. Ele volta com
+// SYSTEM__FRESH_OUT_OF_RESET = 1, saindo de qualquer travamento interno.
+void resetar_sensor_por_hardware()
+{
+    gpio_set_level(static_cast<gpio_num_t>(PIN_XSHUT), 0);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(static_cast<gpio_num_t>(PIN_XSHUT), 1);
+    vTaskDelay(pdMS_TO_TICKS(5));  // boot do sensor: ~1 ms (datasheet), com folga
+}
+
 bool inicializar_sensor(Leitura &l)
 {
     vl6180x::Identificacao id = {};
+    resetar_sensor_por_hardware();  // toda (re)inicialização começa do zero
     esp_err_t erro = barramento.recuperar();
     if (erro == ESP_OK) erro = sensor.iniciar(&id);
 
@@ -208,12 +237,16 @@ bool inicializar_sensor(Leitura &l)
            id.fresh_out_of_reset ? "configuracao obrigatoria carregada" : "sensor ja estava configurado",
            id.offset_mm, vl6180x::taxa_mcps(id.crosstalk),
            static_cast<unsigned long>(vl6180x::MAX_CONVERGENCIA_MS));
+    if (!id.fresh_out_of_reset)
+        printf("[TOF] AVISO: o pulso no XSHUT (GPIO%d) nao reiniciou o sensor. Verifique o fio do XSHUT.\n",
+               PIN_XSHUT);
     return true;
 }
 
 void tarefa_tof(void *)
 {
     Leitura l = {};
+    configurar_xshut();
     const esp_err_t erro_gpio = barramento.iniciar();
     if (erro_gpio != ESP_OK)
         printf("[TOF] Aviso: barramento SDA=GPIO%d/SCL=GPIO%d nao liberou (%s)\n",
@@ -331,9 +364,19 @@ void tarefa_tof(void *)
             medindo = aguardando_pronto = false;
             ++l.timeouts;
             ++timeouts_consecutivos;
-            // Invalida a presença antes do diagnóstico/recuperação, que pode demorar.
-            aplicar_evento(l, detector.invalidar(bola::Causa::Timeout));
+            // Uma medição perdida isolada NÃO derruba a presença: a medição é refeita
+            // e a regra de idade (>100 ms sem leitura nova) continua valendo. Timeouts
+            // seguidos invalidam na hora (e reiniciam o sensor pelo XSHUT, abaixo).
+            if (timeouts_consecutivos >= TIMEOUTS_PARA_REINICIAR)
+                aplicar_evento(l, detector.invalidar(bola::Causa::Timeout));
             publicar(l);
+            if (timeouts_consecutivos < TIMEOUTS_PARA_REINICIAR) {
+                // Perda isolada: refaz já (sem ler registros, para não atrasar).
+                printf("[TOF] Medicao perdida (%s em %lu ms): refeita, presenca mantida\n",
+                       nunca_ficou_pronto ? "sensor nao ficou pronto" : "sem resultado",
+                       static_cast<unsigned long>(TIMEOUT_AMOSTRA_MS));
+                continue;
+            }
             vl6180x::Sensor::Registros r = {};
             if (sensor.ler_registros(&r) == ESP_OK)
                 printf("[TOF] TIMEOUT: %s em %lu ms | RANGE_STATUS=0x%02X (ready=%u, erro=%u) "
@@ -345,14 +388,9 @@ void tarefa_tof(void *)
             else
                 printf("[TOF] TIMEOUT: medicao sem resultado em %lu ms (registros ilegiveis)\n",
                        static_cast<unsigned long>(TIMEOUT_AMOSTRA_MS));
-            // Um timeout isolado só re-dispara (próxima volta). A tentativa de
-            // destravar (que dorme >= 250 ms) fica para timeouts consecutivos.
-            if (timeouts_consecutivos >= 2 && sensor.destravar() != ESP_OK)
-                printf("[TOF] Sensor continua ocupado apos tentativa de parada\n");
-            if (timeouts_consecutivos >= TIMEOUTS_PARA_REINICIAR) {
-                printf("[TOF] Timeouts repetidos: reinicializando o sensor\n");
-                l.sensor_ok = false;
-            }
+            // Timeouts seguidos indicam sensor travado: reset por hardware (XSHUT).
+            printf("[TOF] Timeouts repetidos: reset por XSHUT e reinicializacao\n");
+            l.sensor_ok = false;
             publicar(l);
             continue;
         }
