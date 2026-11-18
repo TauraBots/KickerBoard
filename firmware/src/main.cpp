@@ -113,6 +113,7 @@ struct EventoI2c {
     TipoEventoI2c tipo;
     uint8_t tamanho;
     uint8_t dados[4];
+    uint8_t total;  // bytes realmente recebidos (saturado em 255); dados[] guarda só os 4 primeiros
 };
 struct EstadoCompartilhado {
     float tensao;
@@ -132,6 +133,14 @@ autorizacao::Autorizador autorizador;
 bool ultimo_chute_bloqueado;
 
 uint32_t eventos_i2c_descartados;
+
+// Diagnóstico do I2C escravo (comando "i2c" na Serial): mostra cada escrita do
+// mestre e, a cada 1 s, quantas leituras/seleções de registrador chegaram.
+volatile bool log_i2c = false;
+uint32_t i2c_leituras;      // pedidos de leitura de status
+uint32_t i2c_selecoes;      // escritas "00" (seleciona o registrador de status)
+uint32_t i2c_comandos;      // escritas aceitas (exceto "00")
+uint32_t i2c_rejeitados;    // escritas inválidas ou fila cheia
 
 uint64_t agora_ms() { return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL; }
 void esperar_ms(uint32_t ms)
@@ -528,6 +537,11 @@ void processar_comando(char *comando)
         printf("Testes: %s\n", falhas ? "HA REPROVACOES" : "TODOS APROVADOS");
         return;
     }
+    if (!strcasecmp(comando, "i2c")) {
+        log_i2c = !log_i2c;
+        printf("I2C: log %s\n", log_i2c ? "LIGADO (escritas do mestre + resumo a cada 1 s)" : "DESLIGADO");
+        return;
+    }
     if (!strcasecmp(comando, "status") || !strcasecmp(comando, "s")) { mostrar_status(); return; }
     if (!strncasecmp(comando, "tof", 3)) { tof050c::processar_comando(comando + 3); return; }
     char *fim;
@@ -611,7 +625,7 @@ void escrever_u16_le(uint8_t *destino, uint16_t valor)
 
 bool i2c_requisicao_cb(i2c_slave_dev_handle_t, const i2c_slave_request_event_data_t *, void *)
 {
-    const EventoI2c evento{TipoEventoI2c::LeituraSolicitada, 0, {}};
+    const EventoI2c evento{TipoEventoI2c::LeituraSolicitada, 0, {}, 0};
     BaseType_t tarefa_acordada = pdFALSE;
     if (xQueueSendFromISR(fila_eventos_i2c, &evento, &tarefa_acordada) != pdTRUE)
         __atomic_fetch_add(&eventos_i2c_descartados, 1U, __ATOMIC_RELAXED);
@@ -620,13 +634,11 @@ bool i2c_requisicao_cb(i2c_slave_dev_handle_t, const i2c_slave_request_event_dat
 
 bool i2c_recebimento_cb(i2c_slave_dev_handle_t, const i2c_slave_rx_done_event_data_t *dados, void *)
 {
-    EventoI2c evento{TipoEventoI2c::Recebido, 0, {}};
-    if (dados->length <= sizeof(evento.dados)) {
-        evento.tamanho = static_cast<uint8_t>(dados->length);
-        for (uint8_t i = 0; i < evento.tamanho; ++i) evento.dados[i] = dados->buffer[i];
-    } else {
-        evento.tamanho = 0xff;
-    }
+    EventoI2c evento{TipoEventoI2c::Recebido, 0, {}, 0};
+    evento.total = static_cast<uint8_t>(dados->length > 255 ? 255 : dados->length);
+    const uint32_t copiar = dados->length < sizeof(evento.dados) ? dados->length : sizeof(evento.dados);
+    for (uint32_t i = 0; i < copiar; ++i) evento.dados[i] = dados->buffer[i];
+    evento.tamanho = dados->length <= sizeof(evento.dados) ? static_cast<uint8_t>(dados->length) : 0xff;
     BaseType_t tarefa_acordada = pdFALSE;
     if (xQueueSendFromISR(fila_eventos_i2c, &evento, &tarefa_acordada) != pdTRUE)
         __atomic_fetch_add(&eventos_i2c_descartados, 1U, __ATOMIC_RELAXED);
@@ -680,9 +692,22 @@ void tarefa_i2c(void *)
         if (xQueueReceive(fila_eventos_i2c, &evento, portMAX_DELAY) != pdTRUE) continue;
         if (evento.tipo == TipoEventoI2c::Recebido) {
             ultimo_resultado = (evento.tamanho > 0 && evento.tamanho != 0xff && enfileirar_comando_i2c(evento)) ? 0 : 1;
-            if (ultimo_resultado) ESP_LOGW(TAG, "Comando I2C inválido ou fila cheia");
+            const bool selecao = !ultimo_resultado && evento.tamanho == 1 && evento.dados[0] == 0x00;
+            if (selecao) ++i2c_selecoes;
+            else if (ultimo_resultado) ++i2c_rejeitados;
+            else ++i2c_comandos;
+            if (log_i2c && !selecao) {
+                char hex[16] = {};
+                const uint8_t n = evento.total < 4 ? evento.total : 4;
+                for (uint8_t i = 0; i < n; ++i) snprintf(hex + i * 3, 4, "%02X ", evento.dados[i]);
+                printf("[I2C] RX %u byte(s): %s%s-> %s\n", evento.total, hex, evento.total > 4 ? "... " : "",
+                       ultimo_resultado ? "REJEITADO" : "ACEITO");
+            } else if (ultimo_resultado) {
+                ESP_LOGW(TAG, "Comando I2C inválido ou fila cheia");
+            }
             continue;
         }
+        ++i2c_leituras;
 
         EstadoCompartilhado estado;
         xSemaphoreTake(mutex_estado, portMAX_DELAY);
@@ -738,6 +763,27 @@ void iniciar_i2c()
     }
     printf("I2C escravo: endereço 0x%02X, SDA=GPIO%d, SCL=GPIO%d\n",
            ENDERECO_I2C, PIN_I2C_SDA, PIN_I2C_SCL);
+}
+
+// Resumo do I2C escravo a cada 1 s (só com o log "i2c" ligado). Mostra também
+// segundos sem nenhum tráfego, para distinguir "mestre não envia" de "comando rejeitado".
+void imprimir_resumo_i2c()
+{
+    static uint64_t ultimo = 0;
+    static uint32_t leituras = 0, selecoes = 0, comandos = 0, rejeitados = 0, descartados = 0;
+    const uint64_t agora = agora_ms();
+    if (!log_i2c) { ultimo = agora; return; }
+    if (agora - ultimo < 1000) return;
+    ultimo = agora;
+    const uint32_t l = i2c_leituras, s = i2c_selecoes, c = i2c_comandos, r = i2c_rejeitados,
+                   d = __atomic_load_n(&eventos_i2c_descartados, __ATOMIC_RELAXED);
+    printf("[I2C] 1 s: %lu leitura(s) de status | %lu selecao(oes) 00 | %lu comando(s) | %lu rejeitado(s) | "
+           "%lu evento(s) perdido(s)%s\n",
+           static_cast<unsigned long>(l - leituras), static_cast<unsigned long>(s - selecoes),
+           static_cast<unsigned long>(c - comandos), static_cast<unsigned long>(r - rejeitados),
+           static_cast<unsigned long>(d - descartados),
+           (l == leituras && s == selecoes && c == comandos && r == rejeitados) ? "  <-- NENHUM TRAFEGO" : "");
+    leituras = l; selecoes = s; comandos = c; rejeitados = r; descartados = d;
 }
 
 void processar_fila_remota()
@@ -841,6 +887,7 @@ extern "C" void app_main()
         controlar_pre_carga();
         ler_serial();
         processar_fila_remota();
+        imprimir_resumo_i2c();
         processar_autorizacao_chute();
         imprimir_log();
         publicar_estado_compartilhado();

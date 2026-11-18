@@ -116,3 +116,15 @@ if (Wire.requestFrom(KICKER, sizeof(status)) == sizeof(status)) {
     }
 }
 ```
+
+## Diagnóstico pela Serial
+
+O comando `i2c` na Serial liga e desliga um log do escravo I2C (desligado por padrão):
+
+- `[I2C] RX n byte(s): XX XX -> ACEITO|REJEITADO`: cada escrita do mestre (exceto a seleção `00`);
+- `[I2C] 1 s: ...`: a cada segundo, leituras de status, seleções `00`, comandos aceitos e
+  rejeitados, e eventos perdidos; `NENHUM TRAFEGO` quando nada chegou.
+
+Uma cadência de leitura bem acima da normal (por exemplo, 200 leituras/s em vez de 50) indica
+que o mestre está rejeitando o pacote de status e relendo em modo de erro, como acontecia com
+um mestre que só aceitava a versão `01`.
