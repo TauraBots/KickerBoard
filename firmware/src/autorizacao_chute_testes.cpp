@@ -184,6 +184,48 @@ void caso_sem_pedido_nunca_chuta(Cenario &c)
     VERIFICAR(c, c.chutes == 0);
 }
 
+void caso_chegada_prevista(Cenario &c)
+{
+    // Bola em movimento: o detector ainda não confirmou presença, mas o preditor
+    // indica que ela chega dentro da latência do êmbolo => autoriza.
+    c.e.bola_presente = false;
+    c.a.solicitar(c.t, Origem::I2c);
+    c.passo();
+    VERIFICAR(c, c.chutes == 0);
+    c.e.chegada_prevista = true;
+    c.passo();
+    VERIFICAR(c, c.chutes == 1);
+}
+
+void caso_chegada_prevista_sem_pedido(Cenario &c)
+{
+    c.e.bola_presente = false;
+    c.e.chegada_prevista = true;
+    c.avancar(500);
+    VERIFICAR(c, c.chutes == 0);
+}
+
+void caso_chegada_prevista_com_fault(Cenario &c)
+{
+    c.e.bola_presente = false;
+    c.e.chegada_prevista = true;
+    c.e.fault = true;
+    c.a.solicitar(c.t, Origem::I2c);
+    c.passo();
+    VERIFICAR(c, c.chutes == 0);
+}
+
+void caso_chegada_prevista_leitura_velha(Cenario &c)
+{
+    c.e.bola_presente = false;
+    c.e.chegada_prevista = true;
+    c.tof_congelado = true;  // leitura parou de chegar: mesmo com previsão, não chuta
+    c.avancar(150);
+    c.a.solicitar(c.t, Origem::I2c);
+    c.passo();
+    VERIFICAR(c, c.chutes == 0);
+}
+
 struct Caso {
     const char *nome;
     void (*funcao)(Cenario &);
@@ -202,6 +244,10 @@ const Caso CASOS[] = {
     {"A10. Um chute por pedido", caso_um_chute_por_pedido},
     {"A11. Cancelamento explicito", caso_cancelamento},
     {"A12. Sem pedido nunca chuta", caso_sem_pedido_nunca_chuta},
+    {"A13. Chegada prevista autoriza", caso_chegada_prevista},
+    {"A14. Chegada prevista sem pedido: nada", caso_chegada_prevista_sem_pedido},
+    {"A15. Chegada prevista com FAULT#: nada", caso_chegada_prevista_com_fault},
+    {"A16. Chegada prevista com leitura velha: nada", caso_chegada_prevista_leitura_velha},
 };
 
 }  // namespace

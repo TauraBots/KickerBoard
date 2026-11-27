@@ -43,11 +43,19 @@ constexpr uint32_t INTERVALO_RESUMO_MS = 10000;       // bloco "===== TOF050C ==
 I2cSoft barramento(static_cast<gpio_num_t>(PIN_SDA), static_cast<gpio_num_t>(PIN_SCL), MEIO_PERIODO_I2C_US);
 vl6180x::Sensor sensor(barramento);
 bola::Detector detector;  // usado só pela tarefa do sensor
+chegada::Preditor preditor;  // usado só pela tarefa do sensor
+chegada::Config config_chegada_nova;  // protegida por mutex_leitura
+bool tem_config_chegada_nova = false;
 
 SemaphoreHandle_t mutex_leitura;
 Leitura leitura_compartilhada;
 volatile bool log_ativo = true;
 volatile bool log_rapido = false;  // true: imprime todas as amostras
+// Captura para calibração ("tof c"): uma linha CSV por amostra, com timestamp em µs.
+// Formato: C,<t_us>,<valida>,<bruto_mm>,<codigo_erro>,<bola_presente>,<sinal_mcps>,
+//          <previsao_valida>,<t_disparo_us>,<v_mm_ms>
+// Enquanto ativa, as linhas "[TOF] ..." ficam suprimidas (as transições [BOLA] seguem).
+volatile bool log_csv = false;
 
 // Relógio monotônico real (esp_timer, resolução de µs), usado nos timestamps das amostras.
 uint64_t agora_ms() { return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL; }
@@ -266,6 +274,8 @@ void tarefa_tof(void *)
         if (!l.sensor_ok) {
             medindo = false;
             aplicar_evento(l, detector.invalidar(bola::Causa::ErroSensor));
+            preditor.resetar();
+            l.chegada = chegada::Previsao{};
             if (inicializar_sensor(l)) {
                 erros_consecutivos = timeouts_consecutivos = 0;
                 publicar(l);
@@ -313,7 +323,8 @@ void tarefa_tof(void *)
             erro = sensor.ler_amostra(&amostra);
             medindo = false;
             if (erro == ESP_OK) {
-                const uint64_t t_amostra = agora_ms();  // instante real em que o resultado foi lido
+                const int64_t t_amostra_us = esp_timer_get_time();
+                const uint64_t t_amostra = static_cast<uint64_t>(t_amostra_us) / 1000ULL;  // instante real da leitura
                 l.tem_amostra = true;
                 l.codigo_erro = amostra.codigo_erro;
                 l.erro_sistema = amostra.erro_sistema;
@@ -333,12 +344,24 @@ void tarefa_tof(void *)
                 // Linhas de confirmação, interrupção e transição são sempre impressas;
                 // as demais seguem o limite de INTERVALO_LINHA_MS (ou todas com "tof r").
                 const bool forcar = ev.transicao || ev.confirmacoes > 0 || interrompida;
-                if (log_ativo && (forcar || log_rapido || t_amostra - ultima_linha >= INTERVALO_LINHA_MS)) {
+                if (!log_csv && log_ativo && (forcar || log_rapido || t_amostra - ultima_linha >= INTERVALO_LINHA_MS)) {
                     imprimir_linha(l, ev, interrompida);
                     ultima_linha = t_amostra;
                 }
                 aplicar_evento(l, ev);
+                xSemaphoreTake(mutex_leitura, portMAX_DELAY);
+                const bool trocar_config = tem_config_chegada_nova;
+                const chegada::Config nova = config_chegada_nova;
+                tem_config_chegada_nova = false;
+                xSemaphoreGive(mutex_leitura);
+                if (trocar_config) preditor.configurar(nova);
+                l.chegada = preditor.processar_amostra(l.valida, l.distancia_mm, t_amostra_us);
                 publicar(l);
+                if (log_csv)
+                    printf("C,%lld,%u,%u,%u,%u,%.2f,%u,%lld,%.3f\n", static_cast<long long>(t_amostra_us),
+                           l.valida ? 1U : 0U, l.distancia_bruta, l.codigo_erro, l.bola_presente ? 1U : 0U,
+                           l.sinal_mcps, l.chegada.valida ? 1U : 0U,
+                           static_cast<long long>(l.chegada.valida ? l.chegada.t_disparo_us : 0), l.chegada.v_mm_ms);
             }
         }
 
@@ -349,6 +372,8 @@ void tarefa_tof(void *)
             printf("[TOF] Erro I2C: %s (%lu consecutivos)\n", nome_erro_i2c(erro),
                    static_cast<unsigned long>(erros_consecutivos));
             aplicar_evento(l, detector.invalidar(bola::Causa::ErroSensor));
+            preditor.resetar();
+            l.chegada = chegada::Previsao{};
             barramento.recuperar();
             if (erros_consecutivos >= ERROS_I2C_PARA_REINICIAR) {
                 printf("[TOF] Muitos erros I2C: reinicializando o sensor\n");
@@ -367,8 +392,11 @@ void tarefa_tof(void *)
             // Uma medição perdida isolada NÃO derruba a presença: a medição é refeita
             // e a regra de idade (>100 ms sem leitura nova) continua valendo. Timeouts
             // seguidos invalidam na hora (e reiniciam o sensor pelo XSHUT, abaixo).
-            if (timeouts_consecutivos >= TIMEOUTS_PARA_REINICIAR)
+            if (timeouts_consecutivos >= TIMEOUTS_PARA_REINICIAR) {
                 aplicar_evento(l, detector.invalidar(bola::Causa::Timeout));
+                preditor.resetar();
+                l.chegada = chegada::Previsao{};
+            }
             publicar(l);
             if (timeouts_consecutivos < TIMEOUTS_PARA_REINICIAR) {
                 // Perda isolada: refaz já (sem ler registros, para não atrasar).
@@ -447,6 +475,15 @@ bool obter_leitura(Leitura *destino)
     return true;
 }
 
+void configurar_chegada(const chegada::Config &config)
+{
+    if (!mutex_leitura) return;
+    xSemaphoreTake(mutex_leitura, portMAX_DELAY);
+    config_chegada_nova = config;
+    tem_config_chegada_nova = true;
+    xSemaphoreGive(mutex_leitura);
+}
+
 bool bola_presente_autorizada()
 {
     Leitura l;
@@ -466,8 +503,11 @@ void processar_comando(const char *argumento)
         log_rapido = !log_rapido;
         log_ativo = true;
         printf("TOF050C: log %s\n", log_rapido ? "RAPIDO (todas as amostras)" : "NORMAL (5 linhas/s)");
+    } else if ((argumento[0] == 'c' || argumento[0] == 'C') && !argumento[1]) {
+        log_csv = !log_csv;
+        printf("TOF050C: captura CSV %s\n", log_csv ? "LIGADA (C,t_us,valida,bruto,codigo,bola,sinal)" : "DESLIGADA");
     } else {
-        printf("TOF050C: comando invalido. Use 'tof' (liga/desliga) ou 'tof r' (todas as amostras).\n");
+        printf("TOF050C: comando invalido. Use 'tof' (liga/desliga), 'tof r' (todas as amostras) ou 'tof c' (captura CSV).\n");
     }
 }
 

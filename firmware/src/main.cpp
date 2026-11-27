@@ -20,6 +20,7 @@
 #include "autorizacao_chute.h"
 #include "autorizacao_chute_testes.h"
 #include "kicker_sim_testes.h"
+#include "preditor_chegada_testes.h"
 #include "tof050c.h"
 
 // Modo SIMULAÇÃO (Etapa 3): habilitado SOMENTE pelo ambiente
@@ -73,6 +74,11 @@ constexpr uint32_t PRE_CARGA_DURACAO_MAX_MS = 0;  // 0 = sem limite de tempo (se
 static_assert(PRE_CARGA_RECARGA_V < PRE_CARGA_ALVO_V, "histerese da pre-carga invertida");
 static_assert(PRE_CARGA_ALVO_V >= SETPOINT_MINIMO && PRE_CARGA_ALVO_V <= SETPOINT_MAXIMO,
               "pre-carga fora dos limites de setpoint");
+// Alvo e limiar de recarga da pré-carga em uso. "pre alvo <V> [histerese]" altera SÓ
+// em RAM (ex.: calibração a 150 V); todo boot volta a PRE_CARGA_ALVO_V / _RECARGA_V.
+constexpr float PRE_CARGA_HISTERESE_V = PRE_CARGA_ALVO_V - PRE_CARGA_RECARGA_V;
+float pre_carga_alvo_v = PRE_CARGA_ALVO_V;
+float pre_carga_recarga_v = PRE_CARGA_RECARGA_V;
 
 const char *TAG = "kicker";
 
@@ -129,6 +135,10 @@ struct EstadoCompartilhado {
 
 // Autorização do chute real: todo pedido (Serial, I2C, auto-kick) passa por aqui.
 autorizacao::Autorizador autorizador;
+// Chute preditivo: a bola em movimento é chutada quando o preditor estima que ela
+// toca o kicker dentro da antecipação configurada. Ajustável pela serial ("pred ...").
+bool predicao_ativa = true;
+chegada::Config config_chegada;
 bool ultimo_chute_bloqueado;
 
 uint32_t eventos_i2c_descartados;
@@ -203,7 +213,7 @@ void mostrar_status()
     else printf("Auto-Kick: DESARMADO\n");
     if (pre_carga_armada)
         printf("Pre-carga: ARMADA (%.0f V, recarga < %.0f V) | recargas: %lu | armada ha %llu s\n",
-               PRE_CARGA_ALVO_V, PRE_CARGA_RECARGA_V, static_cast<unsigned long>(pre_carga_total_recargas),
+               pre_carga_alvo_v, pre_carga_recarga_v, static_cast<unsigned long>(pre_carga_total_recargas),
                static_cast<unsigned long long>((agora_ms() - pre_carga_inicio) / 1000));
     else printf("Pre-carga: DESARMADA (rearmar: pre on ou 1)\n");
     printf("Chute: exige bola | bola agora: %s | pedido pendente: %s | autorizados: %lu | bloqueados: %lu\n",
@@ -281,7 +291,10 @@ void solicitar_chute()
 #endif
     if (carregando) parar_carregamento("COMANDO KICK / AUTO-KICK");
     gpio_set_level(PIN_CARREGAMENTO, 0);
+    const int64_t t_disparo_us = esp_timer_get_time();
     gpio_set_level(PIN_CHUTE, 1);
+    // Linha de calibração (mesmo relógio das linhas "C," do TOF): K,<t_us>,<tensao_v>
+    printf("K,%lld,%.1f\n", static_cast<long long>(t_disparo_us), valor_atual);
     esperar_ms(50);
     gpio_set_level(PIN_CHUTE, 0);
     printf("KICK disparado!\n");
@@ -299,18 +312,28 @@ void processar_autorizacao_chute()
         e.leitura_valida = tof.valida;
         e.bola_presente = tof.bola_presente;
         e.instante_ms = tof.instante_ms;
+        e.chegada_prevista = predicao_ativa && chegada::hora_de_disparar(tof.chegada, esp_timer_get_time(), config_chegada);
     }
     e.fault = fault_ativo();
 
     using Tipo = autorizacao::Decisao::Tipo;
     const autorizacao::Decisao d = autorizador.atualizar(agora_ms(), e);
     switch (d.tipo) {
-        case Tipo::Autorizado:
-            printf("[CHUTE] AUTORIZADO (%s) | bola %u mm | pedido ha %lu ms\n", autorizacao::nome_origem(d.origem),
-                   tof.distancia_mm, static_cast<unsigned long>(d.idade_pedido_ms));
+        case Tipo::Autorizado: {
+            const int64_t t_autorizacao_us = esp_timer_get_time();
+            solicitar_chute();  // primeiro o pulso (dura 50 ms): o log não pode atrasar o chute
+            if (e.chegada_prevista && !e.bola_presente)
+                printf("[CHUTE] AUTORIZADO (%s) por PREDICAO | ultima leitura %u mm | v %.2f m/s | contato previsto"
+                       " em %+lld ms | pedido ha %lu ms\n",
+                       autorizacao::nome_origem(d.origem), tof.distancia_mm, tof.chegada.v_mm_ms,
+                       static_cast<long long>((tof.chegada.t_contato_us - t_autorizacao_us) / 1000),
+                       static_cast<unsigned long>(d.idade_pedido_ms));
+            else
+                printf("[CHUTE] AUTORIZADO (%s) | bola %u mm | pedido ha %lu ms\n", autorizacao::nome_origem(d.origem),
+                       tof.distancia_mm, static_cast<unsigned long>(d.idade_pedido_ms));
             ultimo_chute_bloqueado = false;
-            solicitar_chute();
             break;
+        }
         case Tipo::Bloqueio:
             printf("[CHUTE] Aguardando (%s): %s\n", autorizacao::nome_origem(d.origem),
                    autorizacao::descrever_motivo(d.motivo));
@@ -398,12 +421,12 @@ void armar_pre_carga()
     pre_carga_ultima_recarga = 0;
     if (PRE_CARGA_DURACAO_MAX_MS)
         printf("[PRE] ARMADA: alvo %.0f V | recarga abaixo de %.0f V | max %u recargas/%lu s | desarma em %lu s\n",
-               PRE_CARGA_ALVO_V, PRE_CARGA_RECARGA_V, PRE_CARGA_MAX_RECARGAS_JANELA,
+               pre_carga_alvo_v, pre_carga_recarga_v, PRE_CARGA_MAX_RECARGAS_JANELA,
                static_cast<unsigned long>(PRE_CARGA_JANELA_MS / 1000),
                static_cast<unsigned long>(PRE_CARGA_DURACAO_MAX_MS / 1000));
     else
         printf("[PRE] ARMADA: alvo %.0f V | recarga abaixo de %.0f V | max %u recargas/%lu s | sem limite de tempo\n",
-               PRE_CARGA_ALVO_V, PRE_CARGA_RECARGA_V, PRE_CARGA_MAX_RECARGAS_JANELA,
+               pre_carga_alvo_v, pre_carga_recarga_v, PRE_CARGA_MAX_RECARGAS_JANELA,
                static_cast<unsigned long>(PRE_CARGA_JANELA_MS / 1000));
 }
 
@@ -430,7 +453,7 @@ void controlar_pre_carga()
         desarmar_pre_carga("FAULT# ativo");
         return;
     }
-    if (valor_atual >= PRE_CARGA_RECARGA_V) return;
+    if (valor_atual >= pre_carga_recarga_v) return;
     if (fim_ultima_carga && agora - fim_ultima_carga < PRE_CARGA_INTERVALO_MIN_MS) return;
 
     if (agora - pre_carga_janela_inicio >= PRE_CARGA_JANELA_MS) {
@@ -445,13 +468,13 @@ void controlar_pre_carga()
     ++pre_carga_total_recargas;
     if (pre_carga_ultima_recarga)
         printf("[PRE] Recarga #%lu: %.1f V -> %.0f V | %.1f s desde a anterior\n",
-               static_cast<unsigned long>(pre_carga_total_recargas), valor_atual, PRE_CARGA_ALVO_V,
+               static_cast<unsigned long>(pre_carga_total_recargas), valor_atual, pre_carga_alvo_v,
                (agora - pre_carga_ultima_recarga) / 1000.0f);
     else
         printf("[PRE] Recarga #%lu: %.1f V -> %.0f V\n", static_cast<unsigned long>(pre_carga_total_recargas),
-               valor_atual, PRE_CARGA_ALVO_V);
+               valor_atual, pre_carga_alvo_v);
     pre_carga_ultima_recarga = agora;
-    iniciar_carregamento_ate(PRE_CARGA_ALVO_V, true);
+    iniciar_carregamento_ate(pre_carga_alvo_v, true);
 }
 
 void imprimir_log()
@@ -478,6 +501,45 @@ void publicar_estado_compartilhado()
     estado_compartilhado.bola = bola;
     estado_compartilhado.chute_bloqueado = ultimo_chute_bloqueado;
     xSemaphoreGive(mutex_estado);
+}
+
+void mostrar_predicao()
+{
+    printf("[PRED] %s | contato %u mm | antecipacao %.1f ms | %u leituras | v %.2f-%.1f m/s | janela pos-contato %lu ms\n",
+           predicao_ativa ? "ATIVA" : "DESLIGADA", config_chegada.d_contato_mm,
+           config_chegada.latencia_kicker_us / 1000.0f, config_chegada.amostras_regressao, config_chegada.v_min_mm_ms,
+           config_chegada.v_max_mm_ms, static_cast<unsigned long>(config_chegada.janela_pos_contato_us / 1000));
+}
+
+// "pred" | "pred on" | "pred off" | "pred lat <ms>" | "pred dc <mm>" | "pred n <2-6>"
+void processar_comando_predicao(const char *arg)
+{
+    while (*arg == ' ') ++arg;
+    char *fim = nullptr;
+    if (!*arg) {
+        mostrar_predicao();
+        return;
+    }
+    if (!strcasecmp(arg, "on")) predicao_ativa = true;
+    else if (!strcasecmp(arg, "off")) predicao_ativa = false;
+    else if (!strncasecmp(arg, "lat ", 4)) {
+        const float ms = strtof(arg + 4, &fim);
+        if (fim == arg + 4 || ms < 0.0f || ms > 100.0f) { printf("[PRED] latencia invalida (0-100 ms)\n"); return; }
+        config_chegada.latencia_kicker_us = static_cast<uint32_t>(ms * 1000.0f);
+    } else if (!strncasecmp(arg, "dc ", 3)) {
+        const long mm = strtol(arg + 3, &fim, 10);
+        if (fim == arg + 3 || mm < 10 || mm > 100) { printf("[PRED] contato invalido (10-100 mm)\n"); return; }
+        config_chegada.d_contato_mm = static_cast<uint8_t>(mm);
+    } else if (!strncasecmp(arg, "n ", 2)) {
+        const long n = strtol(arg + 2, &fim, 10);
+        if (fim == arg + 2 || n < 2 || n > chegada::MAX_AMOSTRAS) { printf("[PRED] n invalido (2-6)\n"); return; }
+        config_chegada.amostras_regressao = static_cast<uint8_t>(n);
+    } else {
+        printf("[PRED] uso: pred | pred on | pred off | pred lat <ms> | pred dc <mm> | pred n <2-6>\n");
+        return;
+    }
+    tof050c::configurar_chegada(config_chegada);
+    mostrar_predicao();
 }
 
 void processar_comando(char *comando)
@@ -513,6 +575,31 @@ void processar_comando(char *comando)
         cancelar_pedido_chute("comando 2 (parar)");
         return;
     }
+    if (!strncasecmp(comando, "pre alvo", 8)) {
+        // "pre alvo <V> [histerese_V]": histerese opcional de 2 a 30 V (padrão 5 V).
+        float alvo = 0.0f, histerese = PRE_CARGA_HISTERESE_V;
+        int lidos = 0, consumidos = 0;
+        const char *args = comando + 8;
+        if (sscanf(args, " %f%n", &alvo, &consumidos) == 1) {
+            lidos = 1;
+            int mais = 0;
+            if (sscanf(args + consumidos, " %f%n", &histerese, &mais) == 1) consumidos += mais;
+            while (args[consumidos] == ' ') ++consumidos;
+        }
+        if (!lidos || args[consumidos] || alvo < SETPOINT_MINIMO || alvo > SETPOINT_MAXIMO || histerese < 2.0f ||
+            histerese > 30.0f) {
+            printf("[PRE] Invalido. Use: pre alvo <%.0f-%.0f> [histerese 2-30] (em V)\n", SETPOINT_MINIMO,
+                   SETPOINT_MAXIMO);
+            return;
+        }
+        pre_carga_alvo_v = alvo;
+        pre_carga_recarga_v = alvo - histerese;
+        if (carregando && carga_eh_pre) alvo_carga = pre_carga_alvo_v;  // recarga em andamento segue o novo alvo
+        printf("[PRE] ATENCAO: alvo da pre-carga = %.0f V (recarga < %.0f V). Vale ate o proximo boot (padrao %.0f V).\n",
+               pre_carga_alvo_v, pre_carga_recarga_v, PRE_CARGA_ALVO_V);
+        if (!pre_carga_armada) printf("[PRE] Pre-carga desarmada: use 'pre on' para armar.\n");
+        return;
+    }
     if (!strcasecmp(comando, "pre on")) { armar_pre_carga(); return; }
     if (!strcasecmp(comando, "pre off")) {
         if (carregando && carga_eh_pre) parar_carregamento("PRE-CARGA DESARMADA");
@@ -524,12 +611,14 @@ void processar_comando(char *comando)
     if (!strcmp(comando, "3")) { pedir_chute(autorizacao::Origem::Serial); return; }
     if (!strcasecmp(comando, "teste")) {
         const auto escrever = [](const char *linha) { printf("%s\n", linha); };
-        const int falhas = autorizacao::executar_testes(escrever) + kicker_sim::executar_testes(escrever);
+        const int falhas = autorizacao::executar_testes(escrever) + chegada::executar_testes(escrever) +
+                           kicker_sim::executar_testes(escrever);
         printf("Testes: %s\n", falhas ? "HA REPROVACOES" : "TODOS APROVADOS");
         return;
     }
     if (!strcasecmp(comando, "status") || !strcasecmp(comando, "s")) { mostrar_status(); return; }
     if (!strncasecmp(comando, "tof", 3)) { tof050c::processar_comando(comando + 3); return; }
+    if (!strncasecmp(comando, "pred", 4)) { processar_comando_predicao(comando + 4); return; }
     char *fim;
     const float novo = strtof(comando, &fim);
     if (fim != comando && !*fim) {
@@ -818,7 +907,9 @@ extern "C" void app_main()
     printf("          pre on / pre off = pre-carga mantida em %.0f V (recarga < %.0f V), pre = estado\n",
            PRE_CARGA_ALVO_V, PRE_CARGA_RECARGA_V);
     iniciar_i2c();
-    tof050c::iniciar();  // Somente monitor de distância; não atua no kicker.
+    tof050c::iniciar();  // Leitura do sensor, detector de presença e preditor de chegada.
+    tof050c::configurar_chegada(config_chegada);
+    mostrar_predicao();
 #if KICKER_SIMULACAO
     kicker_sim_fw::iniciar();
 #endif
