@@ -8,6 +8,8 @@
 
 #include <cstdint>
 
+#include "preditor_chegada.h"
+
 namespace tof050c {
 
 // Barramento I2C por software dedicado ao sensor (independente do escravo em GPIO6/GPIO7).
@@ -31,6 +33,7 @@ struct Leitura {
     float sinal_mcps;         // taxa de retorno do sinal
     uint64_t instante_ms;     // momento real da última amostra (esp_timer, ms)
     bool bola_presente;       // estado do detector (BOLA_PRESENTE / BOLA_AUSENTE)
+    chegada::Previsao chegada;  // previsão de chegada da bola em movimento (preditor_chegada)
     uint8_t bola_confirmacoes;// confirmações acumuladas em BOLA_AUSENTE
     uint32_t bola_deteccoes;  // transições AUSENTE -> PRESENTE desde o boot
     uint32_t amostras;
@@ -51,6 +54,9 @@ bool obter_leitura(Leitura *destino);
 // leitura com no máximo bola::MAX_IDADE_LEITURA_MS. Nesta etapa NÃO é usada
 // para acionar o kicker; existe para validar a detecção.
 bool bola_presente_autorizada();
+
+// Parâmetros do preditor de chegada (aplicados pela tarefa do sensor na próxima amostra).
+void configurar_chegada(const chegada::Config &config);
 
 // Comando serial "tof [arg]": sem argumento liga/desliga as linhas "[TOF] ...";
 // "r" alterna entre 5 linhas/s e todas as amostras.

@@ -1,7 +1,9 @@
-# TOF050C (VL6180X) — monitor de distância para diagnóstico
+# TOF050C (VL6180X) — sensor de bola do kicker
 
-Esta etapa serve **somente para diagnóstico**. O sensor não comanda carga, pré-carga nem disparo.
-O I²C escravo do kicker (`0x42`, GPIO6/GPIO7, status de 14 bytes) continua igual.
+O sensor **autoriza o chute**: um pedido de chute (`3`, I²C `03`, auto-kick) só dispara com a bola
+presente (parada ou lenta) ou com a chegada da bola prevista (em movimento). O sensor não comanda
+carga nem pré-carga. A regra completa está em [CHUTE_PREDITIVO.md](CHUTE_PREDITIVO.md) e em
+[I2C_PROTOCOL.md](I2C_PROTOCOL.md).
 
 ## Arquivos
 
@@ -11,7 +13,8 @@ O I²C escravo do kicker (`0x42`, GPIO6/GPIO7, status de 14 bytes) continua igua
 | `src/vl6180x.h/.cpp` | Driver do VL6180X: ID, configuração obrigatória AN4545, calibração VHV, medição única periódica, códigos de erro |
 | `src/tof050c.h/.cpp` | Tarefa FreeRTOS, dados protegidos por mutex e logs na USB |
 | `src/bola_detector.h/.cpp` | Detecção de presença da bola (estados, confirmações, histerese, idade das leituras) |
-| `src/main.cpp` | +3 linhas: `#include`, `tof050c::iniciar()` e o comando serial `tof` |
+| `src/preditor_chegada.h/.cpp` | Previsão do instante de chegada da bola em movimento (velocidade por regressão) |
+| `src/main.cpp` | Inicialização, comandos seriais `tof` e `pred`, autorização do chute |
 
 ## Ligação
 
@@ -173,7 +176,27 @@ para registrar todas as amostras.
 - A taxa de sinal (Mcps) ajuda a distinguir os casos: muito alta perto do contato indica bola próxima;
   muito baixa indica ausência de retorno.
 
+## Captura para calibração (`tof c`)
+
+`tof c` liga ou desliga uma linha CSV por amostra, com o relógio da ESP em µs (as linhas `[TOF] ...`
+ficam suprimidas enquanto a captura está ligada):
+
+```
+C,<t_us>,<valida>,<bruto_mm>,<codigo>,<bola>,<sinal_mcps>,<previsao>,<t_disparo_us>,<v_mm_ms>
+```
+
+Cada chute gera `K,<t_us>,<tensao_v>`, com o instante em que o GPIO1 sobe (mesmo relógio). O
+script [`tools/captura_chute.py`](tools/captura_chute.py) usa essas linhas para gravar as rodadas de
+calibração (veja [CHUTE_PREDITIVO.md](CHUTE_PREDITIVO.md)).
+
 ## Limitações conhecidas
+
+- **Medido em bancada (nov/2026)**: a bola encostada lê **~33 mm** (31–35 mm), e a bola é vista a partir
+  de ~175–190 mm. Com a bola à vista, a taxa é de **~50 Hz** (uma leitura a cada ~20 ms; ~12 ms com a bola
+  encostada). **Sem alvo**, cada medição espera a convergência máxima e termina com código 7: ~22 Hz.
+- **Medições perdidas**: com a bola à vista, 3–7% das medições não retornam resultado e só são refeitas
+  após o timeout de 50 ms (~1% sem a bola). A causa ainda não foi isolada (suspeitas: ruído do carregador
+  e do solenoide no I²C por software, ou a Serial atrasando a tarefa do sensor).
 
 - **Alcance**: o VL6180X é especificado para 0–100 mm. Com o fator de escala padrão (×1), a leitura é
   limitada a 255 mm. Os "500 mm" anunciados para o módulo não correspondem ao VL6180X.
@@ -188,4 +211,5 @@ para registrar todas as amostras.
   Sem alvo, a taxa cai para ~25 Hz, porque cada medição espera a convergência máxima.
 - **I²C por software**: SCL de ~200 kHz; cada transação ocupa a CPU por ~0,15 ms, com ~4 transações por amostra
   (prioridade 1, igual ao loop principal). Interrupções apenas esticam o clock, o que o I²C permite.
-- **Validação**: compilação verificada com ESP-IDF 6.1.0. **Os testes físicos ainda não foram feitos.**
+- **Validação**: compilação verificada com ESP-IDF 6.1.0. O roteiro de testes da detecção acima ainda não foi
+  preenchido; a calibração do chute preditivo foi feita em bancada (veja [CHUTE_PREDITIVO.md](CHUTE_PREDITIVO.md)).

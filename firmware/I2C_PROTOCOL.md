@@ -82,9 +82,19 @@ status e verificar o bit 5 (ou a queda da tensão) para saber se o chute ocorreu
 ## Autorização do chute
 
 O comando `03` (assim como `3` pela Serial e o auto-kick) **não dispara imediatamente**: ele cria
-um pedido que só gera chute se, **em até 200 ms**, o TOF050C indicar bola presente com leitura
-válida e recente e o `FAULT#` estiver inativo. Caso contrário, o pedido expira e o bit 5 do status
-vai a 1. Cada pedido gera no máximo um chute. Um novo `03` substitui o pendente (não há fila), e
+um pedido que só gera chute se, **em até 200 ms**, o TOF050C tiver leitura válida e recente, o
+`FAULT#` estiver inativo e uma destas condições valer:
+
+- **bola presente** (parada ou lenta: 3 leituras seguidas a até 49 mm); ou
+- **chegada prevista**: a bola vem em direção ao kicker e o preditor estima que ela chega ao
+  ponto de contato daqui a no máximo 6 ms (veja [CHUTE_PREDITIVO.md](CHUTE_PREDITIVO.md)).
+
+Caso contrário, o pedido expira e o bit 5 do status vai a 1.
+
+**Uso recomendado:** enquanto o robô quiser chutar, o mestre deve **reenviar `03` a cada ~50 ms**
+(sempre dentro da validade de 200 ms). Assim há sempre um pedido ativo, e quem decide o instante do
+chute é o sensor. Um pedido que chega depois do instante ideal só chuta quando chega, e o chute sai
+atrasado e fraco. Cada pedido gera no máximo um chute. Um novo `03` substitui o pendente (não há fila), e
 `02` cancela o pedido pendente. No auto-kick (`05`), a carga para no alvo e o chute fica pendente
 pela mesma regra.
 

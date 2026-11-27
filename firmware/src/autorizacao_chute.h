@@ -6,7 +6,8 @@
 // timestamp. O chute físico só ocorre se, dentro da validade do pedido:
 //   - o TOF050C estiver operante;
 //   - a última leitura for válida e recente (<= max_idade_tof_ms);
-//   - o detector indicar BOLA_PRESENTE (3 confirmações, histerese);
+//   - o detector indicar BOLA_PRESENTE (3 confirmações, histerese) OU o
+//     preditor indicar que a bola em movimento chega dentro da latência do êmbolo;
 //   - o FAULT# do LT3751 estiver inativo.
 // Cada pedido gera no máximo UMA autorização. Não há fila: um novo pedido
 // substitui o pendente. FAULT# ou cancelamento descartam o pedido.
@@ -45,6 +46,9 @@ struct Entrada {
     bool bola_presente;
     uint64_t instante_ms;
     bool fault;
+    // Preditor de chegada: bola em movimento deve tocar o kicker dentro da
+    // latência do êmbolo (agora >= t_disparo). Substitui bola_presente.
+    bool chegada_prevista = false;
 };
 
 struct Decisao {

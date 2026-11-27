@@ -56,7 +56,7 @@ Motivo Autorizador::avaliar(uint64_t agora_ms, const Entrada &e) const
     if (!e.sensor_ok) return Motivo::TofIndisponivel;
     if (!e.tem_amostra || !e.leitura_valida || e.instante_ms > agora_ms) return Motivo::LeituraTofInvalida;
     if (agora_ms - e.instante_ms > config_.max_idade_tof_ms) return Motivo::LeituraTofDesatualizada;
-    if (!e.bola_presente) return Motivo::SemBola;
+    if (!e.bola_presente && !e.chegada_prevista) return Motivo::SemBola;
     return Motivo::Nenhum;
 }
 

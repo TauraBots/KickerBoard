@@ -34,6 +34,19 @@ firmware normal** (`esp32-c3-supermini`). No firmware de simulação, o comando 
 - O pacote de status I²C não mudou: durante uma recarga, o bit "carregando" fica em 1 e a tensão é
   a do ADC.
 
+### Alvo temporário (`pre alvo`)
+
+`pre alvo <V> [histerese]` muda o alvo da pré-carga (20–200 V) e, opcionalmente, a histerese da
+recarga (2–30 V, padrão 5 V). **Vale só até o próximo boot**: a placa sempre liga com 50 V, para
+nunca energizar já carregando até uma tensão alta.
+
+> ⚠️ Com `pre alvo 150`, o capacitor fica em ~150 V o tempo todo e cada chute é muito mais forte.
+
+A 150 V o capacitor perde ~5 V em 2–6 s. Com a histerese padrão de 5 V, a pré-carga recarrega a
+cada poucos segundos e estoura o limite de 6 recargas por minuto. Para calibração a ~150 V use
+`pre alvo 150 15`: o capacitor fica entre 135 e 150 V e recarrega bem menos (medido: ~43 recargas
+em 10 min com um chute a cada ~14 s, sem desarmar).
+
 ## Procedimento de teste
 
 **Antes:**
