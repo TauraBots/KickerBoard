@@ -40,8 +40,19 @@ a bola: se isso acontecer em jogo, reduza `LIMITE_ENTRADA_MM`.
 
 ### Robô andando até a bola
 
-Para o sensor, é a mesma coisa que a bola vindo: o preditor age. Não foi testado com o robô em
-movimento.
+Para o sensor, é a mesma coisa que a bola vindo: o preditor age. Testado com o teleop do robô
+levando o kicker até a bola parada (avaliação visual):
+
+| Tensão | Antecipação | Chutes por predição | Robô a | Resultado |
+|---|---|---|---|---|
+| ~50 V | 8 ms | 10 | 0,55–1,62 m/s | todos bons |
+| ~140 V | 6 ms × 8 ms (alternados) | 9 × 5 | 1,0–1,8 m/s | 6 ms: 2 bons, 5 mais ou menos, 2 ruins; 8 ms: 3 bons, 2 mais ou menos |
+| ~140 V | **6 ms** (final) | 6 | 0,65–1,86 m/s | "muito bom" |
+
+Na rodada alternada, vários chutes de 6 ms tiveram o pedido chegando só 1–5 ms antes do disparo
+(o robô avançou logo no aviso do script); na rodada final, com o pedido ativo antes da chegada, 6 ms
+ficou muito bom e foi mantido. Chegando **devagar e freando**, quem dispara é a regra de presença
+(bola a 37–46 mm), porque a desaceleração empurra a previsão para depois.
 
 ## Parâmetros
 
@@ -95,6 +106,12 @@ Com a antecipação de 9 ms, cerca de metade das bolas era "morta".
 - **Medições perdidas**: com a bola à vista, 3–7% das medições não retornam e só são refeitas após
   50 ms. Em ~9% das chegadas isso deixa a previsão sem leitura recente; a proteção de 30 ms bloqueia
   o disparo pela previsão, e o chute fica por conta da regra de presença (sai atrasado).
+- **Atraso de ~3–5 ms** entre o instante calculado e o disparo real (o contato previsto no log
+  costuma ficar em +2 a +5 ms com antecipação de 6–8 ms). Os valores calibrados já incluem esse
+  atraso; a causa (provavelmente o loop principal) ainda não foi investigada.
+- **Medição perdida com o sensor ocioso**: num timeout registrado, o VL6180X estava pronto e sem
+  resultado pendente (`RANGE_STATUS` ready=1, `INT_STATUS`=0), ou seja, o START não pegou. Detectar
+  isso em ~5 ms e refazer a medição reduziria a perda de 50 ms para poucos ms.
 - A avaliação "forte / morta" foi visual. A velocidade de saída medida pelo sensor é subestimada
   (a bola rápida sai do alcance antes de 2 leituras).
 
